@@ -194,15 +194,24 @@ def h(value):
     return escape(str(value), quote=True)
 
 
-def form(contract=CONTRACT, report=REPORT, parent="", mode="mock"):
+def form(contract=CONTRACT, report=REPORT, parent="", mode="mock", trial_required=False):
     buttons = "".join(f'<a href="/?sample={h(name)}">{h(name)}</a>' for name in CASES)
     has_model = bool(os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY"))
+    trial_configured = bool(os.getenv("SLL_TRIAL_CODE"))
+    has_model = has_model and (not trial_required or trial_configured)
     mode = mode if has_model else "mock"
+    trial_input = ""
+    if trial_required and has_model:
+        hidden = "" if mode == "live" else " hidden"
+        trial_input = f'<div data-trial{hidden}><label>實際模型試用碼 <input type="password" name="trial_code" autocomplete="off" maxlength="256"></label><p>實際模型會將教學資料送至 OpenAI。請使用合成文件。</p></div>'
+    elif trial_required:
+        trial_input = '<p>實際模型尚未啟用。可直接使用 [MOCK MODE]。</p>'
     return f"""<div class="samples">{buttons}</div>
     <form method="post" action="/run">
     <input type="hidden" name="parent" value="{h(parent)}">
     <label>擷取模式 <select name="mode">
     <option value="mock" {'selected' if mode == 'mock' else ''}>[MOCK MODE] 模擬擷取（免金鑰）</option><option value="live" {'selected' if mode == 'live' else ''} {'disabled' if not has_model else ''}>實際模型</option></select></label>
+    {trial_input}
     <p>可直接執行預填案例、貼上資料，或匯入 UTF-8 .txt（每份最多 12 KB）。</p>
     <div class="docs">
       <div><label>授信合約<textarea name="contract" required>{h(contract)}</textarea></label>
@@ -216,7 +225,7 @@ def form(contract=CONTRACT, report=REPORT, parent="", mode="mock"):
     </form>"""
 
 
-def detail(case_id, data, parent, created):
+def detail(case_id, data, parent, created, trial_required=False):
     result = "".join(f"<dt>{h(key)}</dt><dd>{h(value)}</dd>" for key, value in data["result"].items())
     flags = "".join(f"<li>{h(flag)}</li>" for flag in data["flags"])
     trail = "".join(f"<li>{h(step)}</li>" for step in data["trail"])
@@ -231,7 +240,7 @@ def detail(case_id, data, parent, created):
         <label>覆核備註 <input name="note"></label>{approval}<button name="action" value="return">退回補件</button></form>
         """
     if data["status"] != "人工已確認試算":
-        edit = f'<details><summary>修正資料並重跑</summary>{form(data["contract"], data["report"], case_id, data["mode"])}</details>'
+        edit = f'<details><summary>修正資料並重跑</summary>{form(data["contract"], data["report"], case_id, data["mode"], trial_required)}</details>'
     mode = MODE_LABELS[data["mode"]]
     return f"""<p>{mode} · 版本 {case_id} · {h(created)} UTC {previous}</p>
     <h2>{h(data['status'])}</h2><p>評估年度 {h(data['fields'].get('year', '待確認'))}</p>
@@ -244,6 +253,14 @@ def detail(case_id, data, parent, created):
 FORM_SCRIPT = """
 document.addEventListener('change', async (event) => {
     const input = event.target;
+    if (input.matches('select[name=mode]')) {
+        const trial = input.form.querySelector('[data-trial]');
+        if (trial) {
+            trial.hidden = input.value !== 'live';
+            trial.querySelector('input').required = !trial.hidden;
+        }
+        return;
+    }
     if (!input.matches('input[type=file][data-field]') || !input.files.length) return;
     const file = input.files[0];
     const status = input.closest('div').querySelector('[role=status]');
@@ -288,6 +305,24 @@ document.addEventListener('submit', (event) => {
 
 
 class Handler(BaseHTTPRequestHandler):
+    trial_required = False
+
+    def save_snapshot(self, data, parent):
+        return save(data, parent)
+
+    def load_snapshot(self, case_id):
+        return load(case_id)
+
+    def history(self):
+        if not DB.exists():
+            return []
+        with sqlite3.connect(DB) as connection:
+            rows = connection.execute("SELECT id, data FROM snapshots ORDER BY id DESC").fetchall()
+        return [(version, json.loads(raw)) for version, raw in rows]
+
+    def authorize_live(self, args):
+        pass
+
     def respond(self, body, status=200, content_type="text/html; charset=utf-8"):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -317,26 +352,22 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if url.path == "/history":
                 case_links = []
-                if DB.exists():
-                    with sqlite3.connect(DB) as connection:
-                        rows = connection.execute("SELECT id, data FROM snapshots ORDER BY id DESC").fetchall()
-                    for version, raw in rows:
-                        snapshot = json.loads(raw)
-                        year = snapshot["fields"].get("year", "年度待確認")
-                        case_links.append(f'<li><a href="/?id={version}">版本 {version} · {h(year)} · {h(snapshot["status"])}</a></li>')
+                for version, snapshot in self.history():
+                    year = snapshot["fields"].get("year", "年度待確認")
+                    case_links.append(f'<li><a href="/?id={version}">版本 {version} · {h(year)} · {h(snapshot["status"])}</a></li>')
                 self.page("<h2>履約紀錄</h2>" + ("<ul>" + "".join(case_links) + "</ul>" if case_links else "<p>尚無紀錄。</p>"))
                 return
             if url.path == "/" and "id" not in args:
                 self.page("<p>選擇內建案例，或貼上含欄位標籤的教學文件。排放量採 tCO₂e。</p>"
-                          + form(report=CASES.get(args.get("sample", [""])[0], REPORT)))
+                          + form(report=CASES.get(args.get("sample", [""])[0], REPORT), trial_required=self.trial_required))
                 return
             if url.path not in ("/", "/export"):
                 self.page("<p>找不到頁面。</p>", 404)
                 return
             case_id = int(args.get("id", ["0"])[0])
-            parent, created, data = load(case_id)
+            parent, created, data = self.load_snapshot(case_id)
             if url.path == "/":
-                self.page(detail(case_id, data, parent, created))
+                self.page(detail(case_id, data, parent, created, self.trial_required))
                 return
             output = StringIO()
             writer = csv.writer(output)
@@ -372,12 +403,14 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("合約及盤查摘要各限 12 KB，請縮短內容後重試。")
                 parent = int(args["parent"]) if args.get("parent") else None
                 if parent:
-                    load(parent)
+                    self.load_snapshot(parent)
+                if mode == "live":
+                    self.authorize_live(args)
                 data = run_agent(contract, report, mode)
                 data.update(contract=contract, report=report)
             elif self.path == "/review":
                 parent = int(args.get("id", "0"))
-                _, _, data = load(parent)
+                _, _, data = self.load_snapshot(parent)
                 action = args.get("action")
                 if data["status"] not in ("待人工覆核", "試算完成，待確認"):
                     raise ValueError("此版本已完成覆核。")
@@ -392,7 +425,7 @@ class Handler(BaseHTTPRequestHandler):
                 data["trail"].append(data["status"])
             else:
                 raise ValueError("找不到操作。")
-            case_id = save(data, parent)
+            case_id = self.save_snapshot(data, parent)
             self.send_response(303)
             self.send_header("Location", f"/?id={case_id}")
             self.end_headers()
