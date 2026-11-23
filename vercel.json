@@ -2,6 +2,6 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "flask",
   "functions": {
-    "server.py": { "maxDuration": 60 }
+    "server.py": { "maxDuration": 60, "includeFiles": "samples_test.json" }
   }
 }

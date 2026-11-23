@@ -128,6 +128,7 @@ class CloudRequest(Handler):
 @app.get("/guide")
 @app.get("/samples")
 @app.get("/export")
+@app.post("/verification")
 @app.post("/run")
 @app.post("/review")
 def review_flow():

@@ -75,6 +75,11 @@ thead th{font-size:13px;color:var(--muted)}
 """
 
 GUIDE = """
+<section class="panel">
+    <div class="head"><div><h2>批次驗收</h2><p class="note">即時重跑 20 個獨立合成案件，查看判定一致率、異常分流與失敗案例。全程使用 [MOCK MODE]。</p></div>
+    <form method="post" action="/verification"><button type="submit">一鍵跑 20 案模擬驗收</button></form></div>
+</section>
+
 <section class="panel" aria-labelledby="guide-start">
     <div class="head"><div><h2 id="guide-start">第一次使用：正常案件</h2><p class="note">用免金鑰的內建文件，走完一次分析與覆核。</p></div><a class="button" href="/?sample=正常達標">載入正常達標案例</a></div>
     <ol class="steps">

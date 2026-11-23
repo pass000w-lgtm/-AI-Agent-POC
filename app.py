@@ -343,7 +343,125 @@ def form(contract=CONTRACT, report=REPORT, parent="", mode="mock", trial_require
     </form>"""
 
 
-def detail(case_id, data, parent, created, trial_required=False):
+CASE_EXPECTATIONS = {
+    "正常達標": ("達標", "11", "-5"),
+    "剛好等於門檻": ("達標", "10", "-5"),
+    "未達標": ("未達標", "6", "5"),
+    "缺查證": ("待人工覆核", None, None),
+    "併購與重編": ("待人工覆核", None, None),
+    "文件矛盾": ("待人工覆核", None, None),
+}
+
+
+def acceptance_card(data):
+    if data.get("contract", "").splitlines() != CONTRACT.splitlines():
+        return ""
+    submitted_lines = data.get("report", "").splitlines()
+    name = next((name for name, source in CASES.items() if source.splitlines() == submitted_lines), None)
+    if name is None:
+        return ""
+    result = data["result"]
+    actual = ("待人工覆核" if data["flags"] else result.get("判定"),
+              result.get("減幅%"), result.get("利差調整bps"))
+    expected = CASE_EXPECTATIONS[name]
+    rows = "".join(
+        f'<tr><th scope="row">{label}</th><td>{h(want if want is not None else "暫緩試算")}</td>'
+        f'<td>{h(got if got is not None else "暫緩試算")}</td><td>{("一致" if want == got else "有差異")}</td></tr>'
+        for label, want, got in zip(("履約判定", "減幅（%）", "利差調整（bps）"), expected, actual)
+    )
+    match = expected == actual
+    return f"""<section class="panel"><div class="head"><div><h2>內建案例驗收</h2>
+        <p class="note">{h(name)}：與內建標準答案核對。修改案例文件後會依新資料評估。</p></div>
+        <span class="pill {'good' if match else 'warn'}">{'全部一致' if match else '有差異'}</span></div>
+        <div class="scroll"><table><thead><tr><th>檢查項目</th><th>預期結果</th><th>系統結果</th><th>比對</th></tr></thead>
+        <tbody>{rows}</tbody></table></div></section>"""
+
+
+def version_comparison(parent, previous, current):
+    if previous is None:
+        return ""
+    rows = []
+
+    def add(label, old, new):
+        if old != new:
+            rows.append(f'<tr><th scope="row">{h(label)}</th><td>{old}</td><td>{new}</td></tr>')
+
+    def evidence_cell(items):
+        if not items:
+            return "缺少資料"
+        return "<br>".join(f"{h(item['value'])}<small class='note'>{h(item['source'])} · {h(item['quote'])}</small>"
+                           for item in items)
+
+    add("案件狀態", h(previous["status"]), h(current["status"]))
+    add("檢核提醒", h("、".join(previous["flags"]) or "無"), h("、".join(current["flags"]) or "無"))
+    for key, label in FIELDS.items():
+        old = previous["evidence"].get(key, [])
+        new = current["evidence"].get(key, [])
+        if {item["value"] for item in old} != {item["value"] for item in new}:
+            add(label, evidence_cell(old), evidence_cell(new))
+    for label in ("判定", "減幅%", "利差調整bps", "調整百分點", "生效日"):
+        add(label, h(previous["result"].get(label, "暫緩試算")),
+            h(current["result"].get(label, "暫緩試算")))
+    if not rows:
+        rows.append('<tr><td colspan="3">案件狀態、擷取欄位與試算結果一致。</td></tr>')
+    return f"""<details class="panel" open><summary>補件前後比較</summary>
+    <p class="note">對照<a href="/?id={parent}">上一版本</a>與目前版本。欄位變更附原文及行號。</p>
+    <div class="scroll"><table><thead><tr><th>變更項目</th><th>上一版本</th><th>目前版本</th></tr></thead>
+    <tbody>{''.join(rows)}</tbody></table></div></details>"""
+
+
+def batch_verification():
+    from verify import HERE, assess, baseline, evaluate
+
+    cases = json.loads((HERE / "samples_test.json").read_text(encoding="utf-8"))
+    if len(cases) != 20 or len({case["id"] for case in cases}) != 20:
+        raise ValueError("獨立測試集需要 20 個不同案件。")
+    metrics, _, results = evaluate(cases, lambda contract, report: assess(contract, report, "mock"), False)
+    baseline_metrics, _, _ = evaluate(cases, baseline, False)
+
+    def fraction(pair):
+        correct, n = pair
+        return f"{correct}／{n}（{correct / n:.1%}）" if n else "無樣本"
+
+    summary = "".join(
+        f'<tr><th scope="row">{h(key)}</th><td>{fraction(baseline_metrics[key])}</td><td>{fraction(metrics[key])}</td></tr>'
+        for key in ("狀態一致", "欄位擷取正確", "原文引用正確", "判定＋基點＋生效日全對",
+                    "異常正確分流", "正常誤攔", "異常漏放")
+    )
+
+    failed = [case for case in results if not case["一致"]]
+    findings = []
+    for case in failed:
+        differences = []
+        if case["預期"] != case["實際"]:
+            differences.append(f"預期 {case['預期']}，實際 {case['實際']}")
+        if case["預期基點"] != case["基點"]:
+            differences.append(f"利差預期 {case['預期基點']} bps，實際 {case['基點']} bps")
+        if case["預期生效日"] != case["生效日"]:
+            differences.append(f"生效日預期 {case['預期生效日']}，實際 {case['生效日']}")
+        if not case["證據一致"]:
+            differences.append("欄位、引文或行號有差異")
+        findings.append(f"<li>{h(case['id'])} · {h(case['案例'])}：{h('。'.join(differences))}</li>")
+    error_list = "<ul>" + "".join(findings) + "</ul>" if failed else "<p>此次無失敗案例。</p>"
+    rows = "".join(
+        f'<tr><td>{h(case["id"])}</td><th scope="row">{h(case["案例"])}</th><td>{h(case["預期"])}</td>'
+        f'<td>{h(case["實際"])}</td><td>{("一致" if case["一致"] else "有差異")}</td></tr>'
+        for case in results
+    )
+    return f"""<section class="panel"><div class="head"><div><h2>20 案模擬驗收</h2>
+    <p class="note">本次即時重跑 20 個獨立合成案例，與固定規則基準和標準答案比對。免用 Gemini 額度。</p></div>
+    <span class="pill {'warn' if failed else 'good'}">[MOCK MODE]</span></div>
+    <div class="scroll"><table><thead><tr><th>指標</th><th>固定規則基準</th><th>模擬 PoC</th></tr></thead>
+    <tbody>{summary}</tbody></table></div></section>
+    <section class="panel"><h2>失敗案例（{len(failed)} 件）</h2>
+    <p class="note">判定、試算或證據與標準答案有差異時會列在此處。</p>{error_list}</section>
+    <details class="panel"><summary>查看 20 案逐案結果</summary>
+    <div class="scroll"><table><thead><tr><th>編號</th><th>情境</th><th>預期</th><th>實際</th><th>比對</th></tr></thead>
+    <tbody>{rows}</tbody></table></div></details>
+    <a href="/guide">返回使用說明</a>"""
+
+
+def detail(case_id, data, parent, created, trial_required=False, previous_data=None):
     result = "".join(f"<div><dt>{h(key)}</dt><dd>{h(value)}</dd></div>" for key, value in data["result"].items())
     flags = "".join(f"<li>{h(flag)}</li>" for flag in data["flags"])
     trail = "".join(f"<li>{h(step)}</li>" for step in data["trail"])
@@ -375,6 +493,7 @@ def detail(case_id, data, parent, created, trial_required=False):
     {alerts}{metrics}{note}
     <div class="actions"><a class="button secondary" href="/export?id={case_id}">匯出履約與證據 CSV</a><p class="note">下載此版本的判定、證據及覆核紀錄。</p></div>
     </section>
+    {acceptance_card(data)}{version_comparison(parent, previous_data, data)}
     {review}{edit}
     <details class="panel" open><summary>執行與工具紀錄</summary><p class="note">查看系統依序執行的擷取、檢核與試算步驟。</p><ol>{trail}</ol></details>
     <details class="panel"><summary>查看原文證據</summary><p class="note">依文件名稱與行號核對擷取欄位。</p><div class="scroll"><table><thead><tr><th>欄位</th><th>來源</th><th>原文</th></tr></thead><tbody>{rows}</tbody></table></div></details>"""
@@ -572,7 +691,8 @@ class Handler(BaseHTTPRequestHandler):
             case_id = int(args.get("id", ["0"])[0])
             parent, created, data = self.load_snapshot(case_id)
             if url.path == "/":
-                self.page(detail(case_id, data, parent, created, self.trial_required), active="cases")
+                previous_data = self.load_snapshot(parent)[2] if parent else None
+                self.page(detail(case_id, data, parent, created, self.trial_required, previous_data), active="cases")
                 return
             output = StringIO()
             writer = csv.writer(output)
@@ -597,6 +717,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
+            if self.path == "/verification":
+                self.page(batch_verification(), active="guide")
+                return
             length = int(self.headers.get("Content-Length", "0"))
             if not 0 < length <= 240_000:
                 raise ValueError("請輸入教學文件，表單大小上限為 240 KB。")

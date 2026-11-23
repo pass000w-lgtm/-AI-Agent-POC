@@ -71,8 +71,10 @@ def evaluate(cases, engine, repeat):
         elapsed = (perf_counter() - start) * 1000
         if repeat:
             stats["same"] += engine(contract, report) == (status, result, evidence)
+        evidence_matches = not evidence
         if report:
             expected = {key: {tuple(item) for item in items} for key, items in case["expected_evidence"].items()}
+            evidence_matches = evidence == expected
             stats["fields_total"] += len(app.FIELDS)
             stats["fields_ok"] += sum(
                 {item[0] for item in evidence.get(key, set())} == {item[0] for item in expected.get(key, set())}
@@ -93,9 +95,14 @@ def evaluate(cases, engine, repeat):
             stats["false_positive"] += status in (REVIEW, REJECTED)
             stats["adjustment_ok"] += (exact_status and result.get("利差調整bps") == case["expected_bps"]
                                        and result.get("生效日") == case["expected_effective"])
+        matches = (exact_status and evidence_matches
+                   and result.get("利差調整bps") == case["expected_bps"]
+                   and result.get("生效日") == case["expected_effective"])
         stats["ms"] += elapsed
         details.append({"id": case["id"], "案例": case["title"], "預期": expected_status, "實際": status,
                         "基點": result.get("利差調整bps"), "生效日": result.get("生效日"),
+                        "預期基點": case["expected_bps"], "預期生效日": case["expected_effective"],
+                        "證據一致": evidence_matches, "一致": matches,
                         "時間毫秒": round(elapsed, 3)})
     n = len(cases)
     metrics = {
