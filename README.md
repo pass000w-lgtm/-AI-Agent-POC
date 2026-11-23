@@ -45,5 +45,5 @@
 開啟 [Vercel 教學展示版](https://sll-kpi-monitor-poc.vercel.app)。老師可以從同一頁使用內建案例或匯入教學 TXT，檢視證據、人工確認或退回補件，再下載 CSV。
 
 - 預設 `[MOCK MODE]` 免登入、免金鑰。線上版本用私有 Vercel Blob 保存覆核版本，以該瀏覽器的 Cookie 識別。同一瀏覽器可查閱版本。清除 Cookie 或換瀏覽器後，需重新建立案件。本機版繼續使用 SQLite。
-- 要開啟實際模型，請在 Vercel 專案的 Production 環境加入 `GEMINI_API_KEY` 與 `SLL_TRIAL_CODE`，再重新部署。可另設 `GEMINI_MODEL`。Gemini 金鑰設定後，真實模式只向 Gemini 送出請求。老師選「實際模型」並輸入試用碼後，即可分析。每次按下執行才發出模型請求。
+- 要開啟實際模型，請在 Vercel 專案的 Production 環境加入 `GEMINI_API_KEY` 與 `SLL_TRIAL_CODE`，再重新部署。可另設 `GEMINI_MODEL`。Gemini 金鑰設定後，真實模式只向 Gemini 送出請求。預設 Gemini 3.1 Flash-Lite 回傳 503 時，改用 Gemini 2.5 Flash-Lite 試一次，結果及 CSV 會標示實際使用的模型。老師選「實際模型」並輸入試用碼後，即可分析。每次按下執行才發出模型請求。
 - 真實模型請使用教學合成資料。金鑰與試用碼設在 Vercel 後端環境變數。覆核與下載不呼叫模型，正式利率調整由銀行授權人員確認。

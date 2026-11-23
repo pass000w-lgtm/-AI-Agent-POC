@@ -47,6 +47,9 @@ CASES = {
     "併購與重編": REPORT.replace("A廠", "A、B廠").replace("重編：否", "重編：是").replace("併購：否", "併購：是"),
     "文件矛盾": REPORT + "\n年度排放量：9400",
 }
+GEMINI_DEFAULT_MODEL = "gemini-3.1-flash-lite"
+GEMINI_BACKUP_MODEL = "gemini-2.5-flash-lite"
+GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/"
 MODE_LABELS = {"mock": "[MOCK MODE] 模擬擷取", "live": "實際模型"}
 DB = Path(os.environ.get("SLL_DB", str(Path(__file__).with_name("history.sqlite3"))))
 
@@ -55,7 +58,7 @@ DB = Path(os.environ.get("SLL_DB", str(Path(__file__).with_name("history.sqlite3
 def live_configuration():
     gemini_key = (os.getenv("GEMINI_API_KEY") or "").strip()
     if gemini_key:
-        return "Gemini", gemini_key, os.getenv("GEMINI_MODEL") or "gemini-3.1-flash-lite"
+        return "Gemini", gemini_key, os.getenv("GEMINI_MODEL") or GEMINI_DEFAULT_MODEL
     openai_key = (os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY") or "").strip()
     return "OpenAI", openai_key, os.getenv("SLL_MODEL") or os.getenv("LLM_MODEL") or "gpt-4.1-mini"
 
@@ -93,6 +96,8 @@ def openai_error_message(error):
 
 
 def extract(documents, mode):
+    model = ""
+    used_backup = False
     lines = {f"{doc} 第{number}行": line for doc, contents in documents.items()
              for number, line in enumerate(contents.splitlines(), 1) if line.strip()}
     if mode == "live":
@@ -110,7 +115,7 @@ def extract(documents, mode):
         if provider == "Gemini":
             if not re.fullmatch(r"[A-Za-z0-9._-]+", model):
                 raise ValueError("GEMINI_MODEL 格式有誤，請使用 Gemini 模型名稱。")
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            url = f"{GEMINI_ENDPOINT}{model}:generateContent"
             headers["x-goog-api-key"] = key
             item = {"type": "object", "properties": {
                 "value": {"type": "string"}, "source": {"type": "string"},
@@ -138,10 +143,22 @@ def extract(documents, mode):
                     {"role": "user", "content": source_text},
                 ],
             }
-        request = Request(url, json.dumps(payload).encode(), headers)
+        request_data = json.dumps(payload).encode()
+        request = Request(url, request_data, headers)
+        can_use_backup = provider == "Gemini" and model == GEMINI_DEFAULT_MODEL
         try:
-            with urlopen(request, timeout=40) as response:
-                body = json.load(response)
+            try:
+                with urlopen(request, timeout=20 if can_use_backup else 40) as response:
+                    body = json.load(response)
+            except HTTPError as primary_error:
+                if not can_use_backup or primary_error.code != 503:
+                    raise
+                primary_error.close()
+                model = GEMINI_BACKUP_MODEL
+                used_backup = True
+                backup_url = f"{GEMINI_ENDPOINT}{model}:generateContent"
+                with urlopen(Request(backup_url, request_data, headers), timeout=25) as response:
+                    body = json.load(response)
             if provider == "Gemini":
                 parts = body["candidates"][0]["content"]["parts"]
                 content = "".join(part.get("text", "") for part in parts if not part.get("thought"))
@@ -153,7 +170,10 @@ def extract(documents, mode):
         except HTTPError as error:
             if provider == "Gemini":
                 error.close()
-                raise ValueError(gemini_error_message(error.code)) from None
+                message = gemini_error_message(error.code)
+                if used_backup:
+                    message = f"Gemini 主要模型暫時無法使用（503），已嘗試備援模型。{message}"
+                raise ValueError(message) from None
             raise ValueError(openai_error_message(error)) from None
         except (URLError, TimeoutError):
             raise ValueError(f"連線至 {provider} 失敗或逾時，請稍後重試。") from None
@@ -177,7 +197,7 @@ def extract(documents, mode):
             source, value = item.get("source"), item.get("value")
             if isinstance(source, str) and isinstance(value, str) and value.strip() and value in lines.get(source, ""):
                 evidence[name].append({"value": value, "source": source, "quote": lines[source]})
-    return evidence
+    return evidence, model, used_backup
 
 
 def check(evidence):
@@ -236,7 +256,9 @@ def calculate(fields, approval=""):
 
 def run_agent(contract, report, mode):
     trail = ["讀取案件資料"]
-    evidence = extract({"合約": contract, "盤查及查證摘要": report}, mode)
+    evidence, model, used_backup = extract({"合約": contract, "盤查及查證摘要": report}, mode)
+    if used_backup:
+        trail.append("Gemini 主要模型回傳 503，改用 " + model)
     trail.append("擷取欄位及原文")
     fields, flags = check(evidence)
     trail.append("呼叫缺件與異常檢核工具")
@@ -250,7 +272,7 @@ def run_agent(contract, report, mode):
         trail.append("呼叫確定性利差試算工具")
     return dict(status=status, fields=fields, evidence=evidence, flags=flags,
                 result=result, trail=trail, mode=mode,
-                model=live_configuration()[2] if mode == "live" else "")
+                model=model)
 
 
 def save(data, parent=None):
