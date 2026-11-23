@@ -461,6 +461,61 @@ def batch_verification():
     <a href="/guide">返回使用說明</a>"""
 
 
+def emissions_card(data):
+    heading = '<h2 id="emissions-title">減碳績效與目標差距</h2>'
+    if data["flags"] or not data["result"]:
+        reasons = "".join(f"<li>{h(reason)}</li>" for reason in data["flags"])
+        return f"""<section class="panel" aria-labelledby="emissions-title">
+        <div class="head">{heading}<span class="pill warn">待資料確認</span></div>
+        <p class="note">完成下列檢核後，才能比較基準年與當年排放並計算目標差距。</p>
+        {f'<ul class="flags">{reasons}</ul>' if reasons else ""}</section>"""
+
+    fields = data["fields"]
+    baseline, actual, target = (Decimal(fields[key]) for key in ("baseline", "actual", "target"))
+    limit = baseline * (100 - target) / 100
+    reduction = baseline - actual
+    gap = limit - actual
+    scale = max(baseline, actual, limit)
+
+    def amount(value):
+        if 0 < value < Decimal("0.01"):
+            return "小於 0.01"
+        return f"{value:,.2f}".rstrip("0").rstrip(".")
+
+    def bar(label, value, kind):
+        width = value * 100 / scale
+        return f"""<div class="emission-row">
+            <span class="emission-label">{label}</span>
+            <div class="emission-track" aria-hidden="true"><div class="emission-fill {kind}" style="width:{width:.2f}%"></div></div>
+            <strong class="emission-value">{amount(value)} <small>tCO₂e</small></strong></div>"""
+
+    if reduction == 0:
+        change = "與基準年持平"
+    else:
+        change = ("較基準年減少" if reduction > 0 else "較基準年增加") + f" {amount(abs(reduction))} tCO₂e"
+    if gap == 0:
+        distance = "剛好等於合約上限"
+    else:
+        distance = ("低於合約上限" if gap > 0 else "高於合約上限") + f" {amount(abs(gap))} tCO₂e"
+
+    status = "超出排放上限" if gap < 0 else "達到目標"
+    tone = "warn" if gap < 0 else "good"
+    bars = (
+        bar(f"基準年（{h(fields['baseline_year'])}）", baseline, "baseline")
+        + bar("合約排放上限", limit, "target")
+        + bar(f"當年實際（{h(fields['year'])}）", actual, "actual")
+    )
+    return f"""<section class="panel emissions" aria-labelledby="emissions-title">
+    <div class="head"><div>{heading}
+        <p class="note">合約目標為較基準年減排 {amount(target)}%。以下三列以相同尺度呈現。</p></div>
+        <span class="pill {tone}">{status}</span></div>
+    <div class="emission-bars">{bars}</div>
+    <div class="emission-insights"><div><span>與基準年比較</span><strong>{change}</strong></div>
+        <div><span>與合約目標比較</span><strong class="{tone}">{distance}</strong></div></div>
+    <p class="note">合約排放上限 = 基準年排放量 ×（1 − 目標減幅）。畫面數字最多顯示兩位小數。<a href="#source-evidence">核對排放與目標原文</a></p>
+    </section>"""
+
+
 def detail(case_id, data, parent, created, trial_required=False, previous_data=None):
     result = "".join(f"<div><dt>{h(key)}</dt><dd>{h(value)}</dd></div>" for key, value in data["result"].items())
     flags = "".join(f"<li>{h(flag)}</li>" for flag in data["flags"])
@@ -493,13 +548,22 @@ def detail(case_id, data, parent, created, trial_required=False, previous_data=N
     {alerts}{metrics}{note}
     <div class="actions"><a class="button secondary" href="/export?id={case_id}">匯出履約與證據 CSV</a><p class="note">下載此版本的判定、證據及覆核紀錄。</p></div>
     </section>
+    {emissions_card(data)}
     {acceptance_card(data)}{version_comparison(parent, previous_data, data)}
     {review}{edit}
     <details class="panel" open><summary>執行與工具紀錄</summary><p class="note">查看系統依序執行的擷取、檢核與試算步驟。</p><ol>{trail}</ol></details>
-    <details class="panel"><summary>查看原文證據</summary><p class="note">依文件名稱與行號核對擷取欄位。</p><div class="scroll"><table><thead><tr><th>欄位</th><th>來源</th><th>原文</th></tr></thead><tbody>{rows}</tbody></table></div></details>"""
+    <details class="panel" id="source-evidence"><summary>查看原文證據</summary><p class="note">依文件名稱與行號核對擷取欄位。</p><div class="scroll"><table><thead><tr><th>欄位</th><th>來源</th><th>原文</th></tr></thead><tbody>{rows}</tbody></table></div></details>"""
 
 
 FORM_SCRIPT = """
+function openLinkedEvidence() {
+    if (location.hash === '#source-evidence') {
+        const evidence = document.getElementById('source-evidence');
+        if (evidence) evidence.open = true;
+    }
+}
+openLinkedEvidence();
+window.addEventListener('hashchange', openLinkedEvidence);
 async function loadCase(form, name) {
     const status = form.querySelector('[data-case-status]');
     const select = form.querySelector('[data-case]');
@@ -536,6 +600,11 @@ async function loadCase(form, name) {
     }
 }
 document.addEventListener('click', async (event) => {
+    if (event.target.closest('a[href="#source-evidence"]')) {
+        const evidence = document.getElementById('source-evidence');
+        if (evidence) evidence.open = true;
+        return;
+    }
     const random = event.target.closest('[data-random]');
     if (random) {
         await loadCase(random.form, 'random');

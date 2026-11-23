@@ -56,6 +56,19 @@ button.secondary:hover,.button.secondary:hover{background:#eff5f6}
 .metrics>div{padding:10px 13px;border-radius:10px;background:#f0f6f5;border:1px solid #deebe7;min-width:0}
 dt{font-size:13px;color:#47656b;font-weight:650}
 dd{margin:4px 0 0;font-size:17px;font-weight:780;overflow-wrap:anywhere}
+.emission-bars{display:grid;gap:12px;padding:14px;border:1px solid var(--border);border-radius:11px;background:#f8fafb}
+.emission-row{display:grid;grid-template-columns:minmax(135px,auto) minmax(0,1fr) minmax(125px,auto);align-items:center;gap:10px 14px}
+.emission-label{font-weight:650}.emission-value{font-variant-numeric:tabular-nums;text-align:right;overflow-wrap:anywhere}
+.emission-value small{color:var(--muted);white-space:nowrap;font-weight:550}
+.emission-track{height:11px;border-radius:7px;background:#e3ebed;overflow:hidden}
+.emission-fill{height:100%;border-radius:inherit}
+.emission-fill.baseline{background:#547082}.emission-fill.target{background:#3a8b86}.emission-fill.actual{background:#08715f}
+.emission-insights{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:14px 0}
+.emission-insights>div{border:1px solid #deebe7;border-radius:10px;padding:9px 13px;background:#f0f6f5}
+.emission-insights span,.emission-insights strong{display:block}.emission-insights span{font-size:13px;color:var(--muted)}
+.emission-insights strong{font-size:16px;overflow-wrap:anywhere}
+.emission-insights .warn{color:#795019}.emission-insights .good{color:#075b4c}
+@media(max-width:730px){.emission-row{grid-template-columns:minmax(0,1fr) auto;gap:5px 10px}.emission-track{grid-column:1/-1;grid-row:2}.emission-insights{grid-template-columns:1fr}}
 .flags{padding:9px 12px 9px 32px;border-radius:9px;background:#fff5e5;color:#714a1e}
 details.panel{padding:16px 22px}
 summary{font-weight:750;cursor:pointer}
@@ -84,7 +97,7 @@ GUIDE = """
     <div class="head"><div><h2 id="guide-start">第一次使用：正常案件</h2><p class="note">用免金鑰的內建文件，走完一次分析與覆核。</p></div><a class="button" href="/?sample=正常達標">載入正常達標案例</a></div>
     <ol class="steps">
         <li><strong>選擇案例與擷取模式</strong><p>在「示範案件」選正常達標，模式保持 [MOCK MODE]。表單會填入授信合約與盤查及查證摘要。</p></li>
-        <li><strong>執行履約評估</strong><p>檢查結果是否為達標、減幅 11%、利差調整 −5 bps，再展開「查看原文證據」核對數值和行號。</p></li>
+        <li><strong>執行履約評估</strong><p>檢查結果是否為達標、減幅 11%、利差調整 −5 bps，再查看「減碳績效與目標差距」，核對 10,000 tCO₂e 基準、9,000 tCO₂e 合約上限和 8,900 tCO₂e 實際排放。可從卡片開啟原文證據。</p></li>
         <li><strong>人工覆核並下載</strong><p>輸入覆核日期 2026-06-15，點「確認試算」，生效日應為 2026-07-01。下載 CSV，或從「履約紀錄」回看該版本。</p></li>
     </ol>
 </section>
