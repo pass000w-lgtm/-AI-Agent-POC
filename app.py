@@ -8,12 +8,15 @@ import json
 import os
 from pathlib import Path
 import re
+from random import SystemRandom
 import sqlite3
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 import webbrowser
 from threading import Timer
+
+from web_ui import GUIDE, STYLE
 
 FIELDS = dict(
     baseline_year="基準年", baseline="基準排放量", target="目標減幅%",
@@ -52,6 +55,37 @@ GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/openai/chat/
 MODE_LABELS = {"mock": "[MOCK MODE] 模擬擷取", "live": "實際模型"}
 DB = Path(os.environ.get("SLL_DB", str(Path(__file__).with_name("history.sqlite3"))))
 
+
+
+def random_documents():
+    rng = SystemRandom()
+    scenario = rng.choice(tuple(CASES))
+    baseline = rng.randrange(70, 181) * 100
+    target = rng.randint(8, 18)
+    margin = rng.randint(1, 4)
+    bps = rng.randint(3, 9)
+    reduction = target + margin
+    if scenario == "剛好等於門檻":
+        reduction = target
+    elif scenario == "未達標":
+        reduction = target - margin
+    actual = baseline * (100 - reduction) // 100
+    boundary = f"範疇1+2／教學廠區 {rng.randrange(100, 1000)}"
+    contract = (CONTRACT.replace("10000", str(baseline))
+                .replace("目標減幅%：10", f"目標減幅%：{target}")
+                .replace("範疇1+2／A廠", boundary)
+                .replace("達標調整bps：-5", f"達標調整bps：-{bps}")
+                .replace("未達標調整bps：5", f"未達標調整bps：{bps}"))
+    report = REPORT.replace("8900", str(actual)).replace("範疇1+2／A廠", boundary)
+    if scenario == "缺查證":
+        report = report.replace("已附查證：是", "已附查證：否")
+    elif scenario == "併購與重編":
+        report = (report.replace(boundary, boundary + "及新廠")
+                  .replace("基準年重編：否", "基準年重編：是")
+                  .replace("企業併購：否", "企業併購：是"))
+    elif scenario == "文件矛盾":
+        report += f"\n年度排放量：{actual + 100}"
+    return {"contract": contract, "report": report, "scenario": scenario}
 
 
 def live_configuration():
@@ -254,8 +288,11 @@ def h(value):
     return escape(str(value), quote=True)
 
 
-def form(contract=CONTRACT, report=REPORT, parent="", mode="mock", trial_required=False):
-    buttons = "".join(f'<a href="/?sample={h(name)}">{h(name)}</a>' for name in CASES)
+def form(contract=CONTRACT, report=REPORT, parent="", mode="mock", trial_required=False, sample=""):
+    options = "".join(
+        f'<option value="{h(name)}" {"selected" if sample == name else ""}>{h(name)}</option>'
+        for name in CASES
+    )
     provider, key, _ = live_configuration()
     has_model = bool(key)
     trial_configured = bool(os.getenv("SLL_TRIAL_CODE"))
@@ -264,30 +301,50 @@ def form(contract=CONTRACT, report=REPORT, parent="", mode="mock", trial_require
     trial_input = ""
     if trial_required and has_model:
         hidden = "" if mode == "live" else " hidden"
-        trial_input = f'<div data-trial{hidden}><label>實際模型試用碼 <input type="password" name="trial_code" autocomplete="off" maxlength="256"></label><p>實際模型會將教學資料送至 {provider}。請使用合成文件。</p></div>'
+        trial_input = f'<div class="trial" data-trial{hidden}><label>實際模型試用碼 <input type="password" name="trial_code" autocomplete="off" maxlength="256"></label><p class="note">試用碼用來啟用真實擷取。教學文件會送至 {provider}。</p></div>'
     elif trial_required:
         trial_input = '<p>實際模型尚未啟用。可直接使用 [MOCK MODE]。</p>'
-    return f"""<div class="samples">{buttons}</div>
-    <form method="post" action="/run">
+    return f"""<form method="post" action="/run" data-assessment>
     <input type="hidden" name="parent" value="{h(parent)}">
-    <label>擷取模式 <select name="mode">
-    <option value="mock" {'selected' if mode == 'mock' else ''}>[MOCK MODE] 模擬擷取（免金鑰）</option><option value="live" {'selected' if mode == 'live' else ''} {'disabled' if not has_model else ''}>實際模型{'（' + provider + '）' if has_model else ''}</option></select></label>
-    {trial_input}
-    <p>可直接執行預填案例、貼上資料，或匯入 UTF-8 .txt（每份最多 12 KB）。</p>
-    <div class="docs">
-      <div><label>授信合約<textarea name="contract" required>{h(contract)}</textarea></label>
-      <label>匯入合約 TXT <input type="file" accept=".txt,text/plain" data-field="contract"></label>
-      <p role="status"></p></div>
-      <div><label>盤查及查證摘要<textarea name="report" required>{h(report)}</textarea></label>
-      <label>匯入盤查 TXT <input type="file" accept=".txt,text/plain" data-field="report"></label>
-      <p role="status"></p></div>
-    </div>
-    <button>執行履約評估</button><span id="busy" hidden> 正在擷取並檢核資料…</span>
+    <section class="panel">
+      <div class="head"><div><h2>建立評估案件</h2><p class="note">以合成授信合約及盤查摘要驗證永續連結貸款的履約流程。</p></div><a href="/guide">查看使用說明 →</a></div>
+      <div class="controls">
+        <div><label for="case-select">示範案件</label>
+          <select id="case-select" data-case aria-describedby="case-help"><option value="">自訂或生成文件</option>{options}</select>
+        <p id="case-help" class="note">切換案例會填入兩份教學文件，適合快速測試達標或例外。</p></div>
+        <div><label for="mode-select">擷取模式</label><select id="mode-select" name="mode" aria-describedby="mode-help">
+        <option value="mock" {'selected' if mode == 'mock' else ''}>[MOCK MODE] 模擬擷取（免金鑰）</option><option value="live" {'selected' if mode == 'live' else ''} {'disabled' if not has_model else ''}>實際模型{'（' + provider + '）' if has_model else ''}</option></select>
+        <p id="mode-help" class="note">模擬模式適合先走完流程。實際模型用於驗證欄位擷取。</p></div>
+      </div>
+      {trial_input}
+      <div class="assist">
+        <button class="secondary" type="button" data-random aria-describedby="random-help">生成隨機文件</button>
+        <p id="random-help" class="note">隨機填入一組合成文件，可下載 TXT 練習匯入。免用模型額度。</p>
+        <button class="secondary" type="button" data-download="contract" hidden>下載合約 TXT</button>
+        <button class="secondary" type="button" data-download="report" hidden>下載盤查 TXT</button>
+      </div>
+      <p class="status" data-case-status role="status"></p>
+    </section>
+    <section class="panel">
+      <div class="head"><div><h2>案件文件</h2><p class="note">可編輯內建文件、貼上文字或匯入 UTF-8 TXT。每份最多 12 KB，排放量採 tCO₂e。</p></div></div>
+      <div class="docs">
+        <div class="doc"><label>授信合約<textarea name="contract" required spellcheck="false">{h(contract)}</textarea></label>
+        <p class="note">提供基準排放、年度目標與利差條款。</p>
+        <label class="file">匯入合約 TXT <input type="file" accept=".txt,text/plain" data-field="contract"></label>
+        <p class="status" role="status"></p></div>
+        <div class="doc"><label>盤查及查證摘要<textarea name="report" required spellcheck="false">{h(report)}</textarea></label>
+        <p class="note">提供當年排放、盤查邊界及查證狀態。</p>
+        <label class="file">匯入盤查 TXT <input type="file" accept=".txt,text/plain" data-field="report"></label>
+        <p class="status" role="status"></p></div>
+      </div>
+      <div class="actions"><button type="submit">執行履約評估</button><span data-busy role="status" hidden>正在擷取並檢核資料…</span></div>
+      <p class="note">系統會先檢查資料，再試算利差或標示待人工覆核。</p>
+    </section>
     </form>"""
 
 
 def detail(case_id, data, parent, created, trial_required=False):
-    result = "".join(f"<dt>{h(key)}</dt><dd>{h(value)}</dd>" for key, value in data["result"].items())
+    result = "".join(f"<div><dt>{h(key)}</dt><dd>{h(value)}</dd></div>" for key, value in data["result"].items())
     flags = "".join(f"<li>{h(flag)}</li>" for flag in data["flags"])
     trail = "".join(f"<li>{h(step)}</li>" for step in data["trail"])
     rows = "".join(f"<tr><th>{h(FIELDS[name])}</th><td>{h(item['source'])}</td><td>{h(item['quote'])}</td></tr>"
@@ -296,25 +353,92 @@ def detail(case_id, data, parent, created, trial_required=False):
     review = ""
     edit = ""
     if data["status"] in ("待人工覆核", "試算完成，待確認"):
-        approval = '<label>覆核日期 <input name="approval" type="date"></label><button name="action" value="confirm">確認試算</button>' if data["result"] else ""
-        review = f"""<form action="/review" method="post"><input type="hidden" name="id" value="{case_id}">
-        <label>覆核備註 <input name="note"></label>{approval}<button name="action" value="return">退回補件</button></form>
-        """
+        date_input = '<label>覆核日期 <input name="approval" type="date"></label>' if data["result"] else ""
+        confirm = '<button name="action" value="confirm">確認試算</button>' if data["result"] else ""
+        review = f"""<section class="panel"><h2>人工覆核</h2>
+        <p class="note">有試算結果時可輸入覆核日期確認。若需補件，請填備註再退回。</p>
+        <form action="/review" method="post"><input type="hidden" name="id" value="{case_id}">
+        <div class="review-grid"><label>覆核備註 <input name="note" type="text"></label>{date_input}</div>
+        <div class="actions">{confirm}<button class="secondary" name="action" value="return">退回補件</button></div></form>
+        </section>"""
     if data["status"] != "人工已確認試算":
-        edit = f'<details><summary>修正資料並重跑</summary>{form(data["contract"], data["report"], case_id, data["mode"], trial_required)}</details>'
+        edit = f'<details class="panel"><summary>修正資料並重跑</summary><p class="note">重跑會建立新版本，可回查修正前資料。</p>{form(data["contract"], data["report"], case_id, data["mode"], trial_required)}</details>'
     mode = MODE_LABELS[data["mode"]]
     model = f" · {h(data['model'])}" if data.get("model") else ""
-    return f"""<p>{mode}{model} · 版本 {case_id} · {h(created)} UTC {previous}</p>
-    <h2>{h(data['status'])}</h2><p>評估年度 {h(data['fields'].get('year', '待確認'))}</p>
-    <ul>{flags}</ul><dl>{result}</dl><p>{h(data.get('note', ''))}</p>
-    {review}{edit}<p><a href="/export?id={case_id}">匯出履約與證據 CSV</a></p>
-    <details open><summary>執行與工具紀錄</summary><ol>{trail}</ol></details>
-    <details><summary>查看原文證據</summary><table>{rows}</table></details>"""
+    tone = "warn" if data["flags"] else "good"
+    metrics = f'<dl class="metrics">{result}</dl>' if result else ""
+    alerts = f'<ul class="flags">{flags}</ul>' if flags else ""
+    note = f'<p>覆核備註：{h(data["note"])}</p>' if data.get("note") else ""
+    return f"""<section class="panel">
+    <div class="head"><div><h2>{h(data['status'])}</h2><p class="note">評估年度 {h(data['fields'].get('year', '待確認'))}</p></div><span class="pill {tone}">{mode}{model}</span></div>
+    <p class="meta">版本 {case_id} · {h(created)} UTC {previous}</p>
+    {alerts}{metrics}{note}
+    <div class="actions"><a class="button secondary" href="/export?id={case_id}">匯出履約與證據 CSV</a><p class="note">下載此版本的判定、證據及覆核紀錄。</p></div>
+    </section>
+    {review}{edit}
+    <details class="panel" open><summary>執行與工具紀錄</summary><p class="note">查看系統依序執行的擷取、檢核與試算步驟。</p><ol>{trail}</ol></details>
+    <details class="panel"><summary>查看原文證據</summary><p class="note">依文件名稱與行號核對擷取欄位。</p><div class="scroll"><table><thead><tr><th>欄位</th><th>來源</th><th>原文</th></tr></thead><tbody>{rows}</tbody></table></div></details>"""
 
 
 FORM_SCRIPT = """
+async function loadCase(form, name) {
+    const status = form.querySelector('[data-case-status]');
+    const select = form.querySelector('[data-case]');
+    const random = form.querySelector('[data-random]');
+    const submit = form.querySelector('button[type=submit]');
+    if (Number(form.dataset.pending) > 0) {
+        select.value = '';
+        status.textContent = '請等目前的文件讀取完成，再載入其他案例。';
+        return;
+    }
+    const uploads = form.querySelectorAll('input[type=file]');
+    for (const upload of uploads) upload.disabled = true;
+    form.dataset.pending = Number(form.dataset.pending || 0) + 1;
+    select.disabled = random.disabled = submit.disabled = true;
+    status.textContent = '正在載入文件…';
+    try {
+        const response = await fetch('/samples?name=' + encodeURIComponent(name));
+        if (!response.ok) throw new Error();
+        const sample = await response.json();
+        form.elements.contract.value = sample.contract;
+        form.elements.report.value = sample.report;
+        for (const label of form.querySelectorAll('.doc [role=status]')) label.textContent = '';
+        select.value = name === 'random' ? '' : name;
+        for (const button of form.querySelectorAll('[data-download]')) button.hidden = name !== 'random';
+        status.textContent = name === 'random' ? '已生成合成案例：' + sample.scenario : '已載入案例：' + sample.scenario;
+    } catch {
+        select.value = '';
+        status.textContent = '文件載入失敗，已保留原有內容。';
+    } finally {
+        select.disabled = random.disabled = false;
+        for (const upload of uploads) upload.disabled = false;
+        form.dataset.pending--;
+        submit.disabled = Number(form.dataset.pending) > 0;
+    }
+}
+document.addEventListener('click', async (event) => {
+    const random = event.target.closest('[data-random]');
+    if (random) {
+        await loadCase(random.form, 'random');
+        return;
+    }
+    const download = event.target.closest('[data-download]');
+    if (!download) return;
+    const isContract = download.dataset.download === 'contract';
+    const text = download.form.elements[download.dataset.download].value;
+    const url = URL.createObjectURL(new Blob([text], {type: 'text/plain;charset=utf-8'}));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = isContract ? '合成授信合約.txt' : '合成盤查與查證摘要.txt';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
 document.addEventListener('change', async (event) => {
     const input = event.target;
+    if (input.matches('[data-case]') && input.value) {
+        await loadCase(input.form, input.value);
+        return;
+    }
     if (input.matches('select[name=mode]')) {
         const trial = input.form.querySelector('[data-trial]');
         if (trial) {
@@ -327,7 +451,7 @@ document.addEventListener('change', async (event) => {
     const file = input.files[0];
     const status = input.closest('div').querySelector('[role=status]');
     const form = input.form;
-    const button = form.querySelector('button[type=submit], button');
+    const button = form.querySelector('button[type=submit]');
     const target = form.elements.namedItem(input.dataset.field);
     form.dataset.pending = Number(form.dataset.pending || 0) + 1;
     button.disabled = true;
@@ -344,6 +468,7 @@ document.addEventListener('change', async (event) => {
         }
         if (!content.trim() || content.includes(String.fromCharCode(0))) throw new Error('檔案須包含有效文字。');
         target.value = content;
+        form.querySelector('[data-case]').value = '';
         status.textContent = '已匯入 ' + file.name;
     } catch (error) {
         status.textContent = error.message + ' 原有內容已保留。';
@@ -355,7 +480,7 @@ document.addEventListener('change', async (event) => {
     }
 });
 document.addEventListener('submit', (event) => {
-    const busy = event.target.querySelector('#busy');
+    const busy = event.target.querySelector('[data-busy]');
     if (!busy) return;
     if (Number(event.target.dataset.pending) > 0) {
         event.preventDefault();
@@ -393,35 +518,53 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body.encode())
 
-    def page(self, body, status=200):
-        self.respond(f"""<!doctype html><html lang="zh-Hant"><meta charset="utf-8">
+    def page(self, body, status=200, active=""):
+        links = "".join(
+            f'<a href="{path}" {("aria-current=page" if active == name else "")}>{label}</a>'
+            for name, path, label in (
+                ("cases", "/", "示範案件"), ("history", "/history", "履約紀錄"), ("guide", "/guide", "使用說明")
+            )
+        )
+        self.respond(f"""<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>永續連結貸款 KPI 履約監測</title>
-        <style>
-        *{{box-sizing:border-box}} body{{font:16px system-ui,sans-serif;background:#eff5f1;color:#16382e;margin:0}}
-        main{{max-width:980px;margin:32px auto;background:white;padding:clamp(16px,4vw,42px);border-radius:18px}}
-        .docs{{display:grid;grid-template-columns:repeat(auto-fit,minmax(255px,1fr));gap:16px}}
-        label,summary{{display:block;margin:12px 0}} textarea{{display:block;width:100%;min-height:220px;margin-top:8px;padding:12px;border:1px solid #8fa79e}}
-        a{{color:#165946}} .samples a{{display:inline-block;margin:0 12px 10px 0}}
-        button{{background:#165946;color:white;padding:9px 14px;border:0;border-radius:6px;cursor:pointer;margin:4px}}
-        th,td{{padding:6px 9px;text-align:left;border-bottom:1px solid #dae4de}} dt{{font-weight:700}} dd{{margin:0 0 8px}}
-        </style><main><nav><a href="/">示範案件</a> · <a href="/history">履約紀錄</a></nav><h1>永續連結貸款 KPI 履約監測</h1>
-        {body}</main><script>{FORM_SCRIPT}</script></html>""", status)
+        <title>永續連結貸款 KPI 履約監測</title><style>{STYLE}</style></head>
+        <body><header class="top"><div class="top-inner">
+        <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">SLL</span>永續授信工作台</a>
+        <nav aria-label="主要導覽">{links}</nav></div></header><main>
+        <header class="hero"><h1>永續連結貸款 KPI 履約監測</h1>
+        <p>依合約審查排放績效、追溯來源，並覆核利差試算。</p></header>
+        {body}</main><script>{FORM_SCRIPT}</script></body></html>""", status)
 
     def do_GET(self):
         url = urlparse(self.path)
         args = parse_qs(url.query)
         try:
+            if url.path == "/guide":
+                self.page(GUIDE, active="guide")
+                return
+            if url.path == "/samples":
+                name = args.get("name", [""])[0]
+                if name == "random":
+                    sample = random_documents()
+                elif name in CASES:
+                    sample = {"contract": CONTRACT, "report": CASES[name], "scenario": name}
+                else:
+                    self.respond('{"error":"找不到此案例"}', 404, "application/json; charset=utf-8")
+                    return
+                self.respond(json.dumps(sample, ensure_ascii=False), content_type="application/json; charset=utf-8")
+                return
             if url.path == "/history":
-                case_links = []
+                rows = []
                 for version, snapshot in self.history():
                     year = snapshot["fields"].get("year", "年度待確認")
-                    case_links.append(f'<li><a href="/?id={version}">版本 {version} · {h(year)} · {h(snapshot["status"])}</a></li>')
-                self.page("<h2>履約紀錄</h2>" + ("<ul>" + "".join(case_links) + "</ul>" if case_links else "<p>尚無紀錄。</p>"))
+                    rows.append(f'<tr><td><a href="/?id={version}">版本 {version}</a></td><td>{h(year)}</td><td>{h(snapshot["status"])}</td></tr>')
+                table = '<div class="scroll"><table class="history"><thead><tr><th>版本</th><th>評估年度</th><th>案件狀態</th></tr></thead><tbody>' + "".join(rows) + '</tbody></table></div>'
+                self.page('<section class="panel"><h2>履約紀錄</h2><p class="note">從版本連結回查歷次評估和人工覆核結果。</p>'
+                          + (table if rows else "<p>尚無紀錄。</p>") + '</section>', active="history")
                 return
             if url.path == "/" and "id" not in args:
-                self.page("<p>選擇內建案例，或貼上含欄位標籤的教學文件。排放量採 tCO₂e。</p>"
-                          + form(report=CASES.get(args.get("sample", [""])[0], REPORT), trial_required=self.trial_required))
+                name = args.get("sample", ["正常達標"])[0]
+                self.page(form(report=CASES.get(name, REPORT), trial_required=self.trial_required, sample=name), active="cases")
                 return
             if url.path not in ("/", "/export"):
                 self.page("<p>找不到頁面。</p>", 404)
@@ -429,7 +572,7 @@ class Handler(BaseHTTPRequestHandler):
             case_id = int(args.get("id", ["0"])[0])
             parent, created, data = self.load_snapshot(case_id)
             if url.path == "/":
-                self.page(detail(case_id, data, parent, created, self.trial_required))
+                self.page(detail(case_id, data, parent, created, self.trial_required), active="cases")
                 return
             output = StringIO()
             writer = csv.writer(output)
@@ -494,7 +637,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Location", f"/?id={case_id}")
             self.end_headers()
         except ValueError as error:
-            self.page(f'<p>{h(error)}</p><p><button onclick="history.back()">返回表單</button></p>', 400)
+            self.page(f'<section class="panel"><h2>無法完成操作</h2><p>{h(error)}</p><button onclick="history.back()">返回表單</button></section>', 400)
 
 
 if __name__ == "__main__":

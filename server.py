@@ -125,6 +125,8 @@ class CloudRequest(Handler):
 
 @app.get("/")
 @app.get("/history")
+@app.get("/guide")
+@app.get("/samples")
 @app.get("/export")
 @app.post("/run")
 @app.post("/review")
