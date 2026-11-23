@@ -19,7 +19,7 @@
 
 ## 實際模型
 
-在啟動前於本機環境設定 GEMINI_API_KEY。GEMINI_MODEL 預設 gemini-3.1-flash-lite。若未設定 Gemini 金鑰，也可設定 OPENAI_API_KEY（或 LLM_API_KEY），OpenAI 模型由 SLL_MODEL（或 LLM_MODEL）指定。選擇「實際模型」後執行，資料會傳送至畫面標示的模型服務，請使用教學合成資料。服務錯誤會明確顯示，介面可切回模擬模式。實際模型的輸出品質與課程至少 20 個獨立案例的整體驗收待驗證。
+在啟動前於本機環境設定 GEMINI_API_KEY。GEMINI_MODEL 預設 gemini-3.5-flash-lite。若未設定 Gemini 金鑰，也可設定 OPENAI_API_KEY（或 LLM_API_KEY），OpenAI 模型由 SLL_MODEL（或 LLM_MODEL）指定。選擇「實際模型」後執行，資料會傳送至畫面標示的模型服務，請使用教學合成資料。服務錯誤會明確顯示，介面可切回模擬模式。實際模型的輸出品質與課程至少 20 個獨立案例的整體驗收待驗證。
 
 此原型支援範疇一與二排放量減幅、合約所列達標及未達標基點、覆核通過次月首日生效。支持的排放量單位為 tCO₂e。正式利率調整由授權人員作業。
 
@@ -45,5 +45,9 @@
 開啟 [Vercel 教學展示版](https://sll-kpi-monitor-poc.vercel.app)。老師可以從同一頁使用內建案例或匯入教學 TXT，檢視證據、人工確認或退回補件，再下載 CSV。
 
 - 預設 `[MOCK MODE]` 免登入、免金鑰。線上版本用私有 Vercel Blob 保存覆核版本，以該瀏覽器的 Cookie 識別。同一瀏覽器可查閱版本。清除 Cookie 或換瀏覽器後，需重新建立案件。本機版繼續使用 SQLite。
-- 要開啟實際模型，請在 Vercel 專案的 Production 環境加入 `GEMINI_API_KEY` 與 `SLL_TRIAL_CODE`，再重新部署。可另設 `GEMINI_MODEL`。Gemini 金鑰設定後，真實模式只向 Gemini 送出請求。Gemini 主模型回傳 404 或 503 時，會先查詢該 API 專案可見的模型，從 Google 公布有免費層的備援清單選一個支援 generateContent 的模型再試。結果和 CSV 標示實際使用的模型。老師選「實際模型」並輸入試用碼後，即可分析。每次按下執行才發出模型請求。
+- 要開啟實際模型，請在 Vercel 專案的 Production 環境加入 `GEMINI_API_KEY` 與 `SLL_TRIAL_CODE`，再重新部署。可另設 `GEMINI_MODEL`。Gemini 金鑰設定後，真實模式只向 Gemini 送出請求。Gemini 使用 Google 提供的相容端點以 JSON 格式擷取資料；每次評估提交一次生成請求。結果和 CSV 標示實際使用的模型。老師選「實際模型」並輸入試用碼後，即可分析。每次按下執行才發出模型請求。
 - 真實模型請使用教學合成資料。金鑰與試用碼設在 Vercel 後端環境變數。覆核與下載不呼叫模型，正式利率調整由銀行授權人員確認。
+
+## 任務四真實 Gemini 驗收
+
+本機設定 `GEMINI_API_KEY` 後執行 `python smoke_gemini.py`，只會送一筆內建合成案件。此檢查驗證欄位值、原文行號、履約試算及人工覆核後的生效日。實測證據見 [任務四真實 Gemini 驗收紀錄](任務四_Gemini實測.md)。

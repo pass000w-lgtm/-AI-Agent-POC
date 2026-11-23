@@ -47,12 +47,8 @@ CASES = {
     "併購與重編": REPORT.replace("A廠", "A、B廠").replace("重編：否", "重編：是").replace("併購：否", "併購：是"),
     "文件矛盾": REPORT + "\n年度排放量：9400",
 }
-GEMINI_DEFAULT_MODEL = "gemini-3.1-flash-lite"
-GEMINI_BACKUP_MODELS = (
-    "gemini-3.5-flash-lite", "gemini-2.5-flash-lite",
-    "gemini-3.6-flash", "gemini-3.8-flash", "gemini-2.5-flash",
-)
-GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/"
+GEMINI_DEFAULT_MODEL = "gemini-3.5-flash-lite"
+GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 MODE_LABELS = {"mock": "[MOCK MODE] 模擬擷取", "live": "實際模型"}
 DB = Path(os.environ.get("SLL_DB", str(Path(__file__).with_name("history.sqlite3"))))
 
@@ -75,22 +71,6 @@ def gemini_error_message(status):
         429: "已達請求速率或可用配額。請在 Google AI Studio 查看專案的用量及速率限制。",
     }
     return f"Gemini 無法完成請求（{status}）。" + messages.get(status, "請稍後再試。")
-
-
-class NoGeminiBackup(Exception):
-    pass
-
-
-def available_gemini_backup(headers, primary):
-    url = GEMINI_ENDPOINT.rstrip("/") + "?pageSize=1000"
-    with urlopen(Request(url, headers=headers), timeout=8) as response:
-        document = json.load(response)
-    available = {
-        item.get("name", "").removeprefix("models/")
-        for item in document.get("models", [])
-        if "generateContent" in item.get("supportedGenerationMethods", [])
-    }
-    return next((model for model in GEMINI_BACKUP_MODELS if model != primary and model in available), None)
 
 
 def openai_error_message(error):
@@ -116,7 +96,6 @@ def openai_error_message(error):
 
 def extract(documents, mode):
     model = ""
-    used_backup = None
     lines = {f"{doc} 第{number}行": line for doc, contents in documents.items()
              for number, line in enumerate(contents.splitlines(), 1) if line.strip()}
     if mode == "live":
@@ -130,81 +109,33 @@ def extract(documents, mode):
                         "輸出所有互相矛盾的值。缺漏回傳空陣列。開關值使用原文的 是 或 否。"
                         "不得推算。欄位與標籤對照：" + json.dumps(FIELDS, ensure_ascii=False))
         source_text = json.dumps(lines, ensure_ascii=False)
-        headers = {"Content-Type": "application/json"}
-        if provider == "Gemini":
-            if not re.fullmatch(r"[A-Za-z0-9._-]+", model):
-                raise ValueError("GEMINI_MODEL 格式有誤，請使用 Gemini 模型名稱。")
-            url = f"{GEMINI_ENDPOINT}{model}:generateContent"
-            headers["x-goog-api-key"] = key
-            item = {"type": "object", "properties": {
-                "value": {"type": "string"}, "source": {"type": "string"},
-            }, "required": ["value", "source"]}
-            payload = {
-                "systemInstruction": {"parts": [{"text": instructions}]},
-                "contents": [{"role": "user", "parts": [{"text": source_text}]}],
-                "generationConfig": {
-                    "responseMimeType": "application/json",
-                    "responseJsonSchema": {
-                        "type": "object",
-                        "properties": {field: {"type": "array", "items": item} for field in FIELDS},
-                        "required": list(FIELDS),
-                    },
-                },
-            }
-        else:
-            url = "https://api.openai.com/v1/chat/completions"
-            headers["Authorization"] = f"Bearer {key}"
-            payload = {
-                "model": model,
-                "response_format": {"type": "json_object"},
-                "messages": [
-                    {"role": "system", "content": instructions},
-                    {"role": "user", "content": source_text},
-                ],
-            }
-        request_data = json.dumps(payload).encode()
-        request = Request(url, request_data, headers)
-        can_use_backup = provider == "Gemini"
-        primary_status = None
+        url = GEMINI_ENDPOINT if provider == "Gemini" else "https://api.openai.com/v1/chat/completions"
+        payload = {
+            "model": model,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": instructions},
+                {"role": "user", "content": source_text},
+            ],
+        }
+        request = Request(url, json.dumps(payload).encode(), {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {key}",
+        })
         try:
-            try:
-                with urlopen(request, timeout=20 if can_use_backup else 40) as response:
-                    body = json.load(response)
-            except HTTPError as primary_error:
-                if not can_use_backup or primary_error.code not in (404, 503):
-                    raise
-                primary_status = primary_error.code
-                primary_error.close()
-                backup = available_gemini_backup(headers, model)
-                if not backup:
-                    raise NoGeminiBackup(f"Gemini 主模型回傳 {primary_status}。此 API 專案的模型清單沒有可用的免費層備援模型。")
-                model = backup
-                used_backup = primary_status
-                backup_url = f"{GEMINI_ENDPOINT}{model}:generateContent"
-                with urlopen(Request(backup_url, request_data, headers), timeout=20) as response:
-                    body = json.load(response)
-            if provider == "Gemini":
-                parts = body["candidates"][0]["content"]["parts"]
-                content = "".join(part.get("text", "") for part in parts if not part.get("thought"))
-            else:
-                content = body["choices"][0]["message"]["content"]
+            with urlopen(request, timeout=40) as response:
+                body = json.load(response)
+            content = body["choices"][0]["message"]["content"]
             data = json.loads(content)
             if not isinstance(data, dict):
                 raise ValueError()
         except HTTPError as error:
             if provider == "Gemini":
                 error.close()
-                message = gemini_error_message(error.code)
-                if used_backup:
-                    message = f"Gemini 主模型回傳 {primary_status}，已嘗試備援模型。{message}"
-                elif primary_status:
-                    message = f"Gemini 主模型回傳 {primary_status}，且模型清單查詢失敗。{message}"
-                raise ValueError(message) from None
+                raise ValueError(gemini_error_message(error.code)) from None
             raise ValueError(openai_error_message(error)) from None
         except (URLError, TimeoutError):
             raise ValueError(f"連線至 {provider} 失敗或逾時，請稍後重試。") from None
-        except NoGeminiBackup as error:
-            raise ValueError(str(error)) from None
         except (AttributeError, KeyError, ValueError, IndexError, TypeError):
             raise ValueError(f"{provider} 回傳的內容無法解析為擷取結果。請確認模型支援 JSON 模式。") from None
     else:
@@ -225,7 +156,7 @@ def extract(documents, mode):
             source, value = item.get("source"), item.get("value")
             if isinstance(source, str) and isinstance(value, str) and value.strip() and value in lines.get(source, ""):
                 evidence[name].append({"value": value, "source": source, "quote": lines[source]})
-    return evidence, model, used_backup
+    return evidence, model
 
 
 def check(evidence):
@@ -284,9 +215,7 @@ def calculate(fields, approval=""):
 
 def run_agent(contract, report, mode):
     trail = ["讀取案件資料"]
-    evidence, model, used_backup = extract({"合約": contract, "盤查及查證摘要": report}, mode)
-    if used_backup:
-        trail.append(f"Gemini 主模型回傳 {used_backup}，改用 {model}")
+    evidence, model = extract({"合約": contract, "盤查及查證摘要": report}, mode)
     trail.append("擷取欄位及原文")
     fields, flags = check(evidence)
     trail.append("呼叫缺件與異常檢核工具")
