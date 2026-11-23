@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 import webbrowser
@@ -51,13 +51,37 @@ MODE_LABELS = {"mock": "[MOCK MODE] 模擬擷取", "live": "實際模型"}
 DB = Path(os.environ.get("SLL_DB", str(Path(__file__).with_name("history.sqlite3"))))
 
 
+
+def openai_error_message(error):
+    try:
+        with error:
+            details = json.loads(error.read(16_384)).get("error", {})
+        reason = details.get("code") or details.get("type")
+    except (AttributeError, OSError, ValueError):
+        reason = None
+    if error.code == 429 and reason in ("insufficient_quota", "billing_hard_limit_reached"):
+        return "OpenAI 額度不足（429）。請確認 API 專案的帳務、餘額及用量限制。"
+    messages = {
+        400: "OpenAI 拒絕擷取請求（400）。請確認 SLL_MODEL 支援 Chat Completions 的 JSON 模式。",
+        401: "OpenAI 拒絕 API 金鑰（401）。請在 Vercel 更新 OPENAI_API_KEY，再重新部署。",
+        403: "OpenAI 拒絕存取（403）。請確認 API 金鑰的專案及模型使用權限。",
+        404: "OpenAI 找不到指定模型或專案無法存取（404）。請確認 SLL_MODEL。",
+        429: "OpenAI 暫時限制請求（429）。請確認 API 專案的速率限制及用量。",
+    }
+    if error.code >= 500:
+        return f"OpenAI 服務暫時無法完成請求（{error.code}）。"
+    return messages.get(error.code, f"OpenAI 請求失敗（{error.code}）。")
+
+
 def extract(documents, mode):
     lines = {f"{doc} 第{number}行": line for doc, contents in documents.items()
              for number, line in enumerate(contents.splitlines(), 1) if line.strip()}
     if mode == "live":
-        key = os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY")
+        key = (os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY") or "").strip()
         if not key:
             raise ValueError("尚未設定模型金鑰。請使用 [MOCK MODE] 或設定 OPENAI_API_KEY。")
+        if not key.isascii() or any(character.isspace() for character in key):
+            raise ValueError("OpenAI API 金鑰格式有誤。請重新貼上金鑰原文，再重新部署。")
         payload = {
             "model": os.getenv("SLL_MODEL") or os.getenv("LLM_MODEL") or "gpt-4.1-mini",
             "response_format": {"type": "json_object"},
@@ -77,8 +101,12 @@ def extract(documents, mode):
                 data = json.loads(json.load(response)["choices"][0]["message"]["content"])
             if not isinstance(data, dict):
                 raise ValueError()
-        except (URLError, TimeoutError, KeyError, ValueError, IndexError, TypeError) as error:
-            raise ValueError("實際模型擷取失敗，請確認模型設定及連線後重試。") from error
+        except HTTPError as error:
+            raise ValueError(openai_error_message(error)) from None
+        except (URLError, TimeoutError):
+            raise ValueError("連線至 OpenAI 失敗或逾時，請稍後重試。") from None
+        except (KeyError, ValueError, IndexError, TypeError):
+            raise ValueError("OpenAI 回傳的內容無法解析為擷取結果。請確認模型支援 JSON 模式。") from None
     else:
         data = {}
         for name, label in FIELDS.items():
