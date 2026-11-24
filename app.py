@@ -295,13 +295,20 @@ def form(contract=CONTRACT, report=REPORT, parent="", mode="mock", trial_require
     )
     provider, key, _ = live_configuration()
     has_model = bool(key)
-    trial_configured = bool(os.getenv("SLL_TRIAL_CODE"))
-    has_model = has_model and (not trial_required or trial_configured)
+    trial_code = os.getenv("SLL_TRIAL_CODE")
+    has_model = has_model and (not trial_required or bool(trial_code))
     mode = mode if has_model else "mock"
     trial_input = ""
     if trial_required and has_model:
         hidden = "" if mode == "live" else " hidden"
-        trial_input = f'<div class="trial" data-trial{hidden}><label>實際模型試用碼 <input type="password" name="trial_code" autocomplete="off" maxlength="256"></label><p class="note">試用碼用來啟用真實擷取。教學文件會送至 {provider}。</p></div>'
+        trial_hint = 'Gemini 試用碼為 <strong><code>test</code></strong>（四個小寫字母）。'
+        if provider != "Gemini" or trial_code != "test":
+            trial_hint = "試用碼用來啟用真實擷取。"
+        trial_input = f"""<div class="trial" data-trial{hidden}>
+          <label for="trial-code">實際模型試用碼</label>
+          <input id="trial-code" type="password" name="trial_code" autocomplete="off" maxlength="256" aria-describedby="trial-help">
+          <p id="trial-help" class="note">{trial_hint}教學文件會送至 {provider}。</p>
+        </div>"""
     elif trial_required:
         trial_input = '<p>實際模型尚未啟用。可直接使用 [MOCK MODE]。</p>'
     return f"""<form method="post" action="/run" data-assessment>
